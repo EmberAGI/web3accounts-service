@@ -1,0 +1,17 @@
+{
+  "name": "web3accounts-service",
+  "version": "0.1.0",
+  "description": "A decentralized service for the web3accounts library using zero-knowledge proof client-side smart contracts.",
+  "main": "index.ts",
+  "repository": "https://github.com/Firepot-Finance/web3accounts-service.git",
+  "author": "Tom Daniel <0xtomdaniel@gmail.com>",
+  "license": "UNLICENSED",
+  "private": true,
+  "devDependencies": {
+    "typescript": "^5.1.6",
+    "vite-node": "^0.33.0"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
