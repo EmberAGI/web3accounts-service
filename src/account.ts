@@ -6,24 +6,33 @@ import {
   getDocs,
   updateDoc,
   deleteField,
+  arrayUnion,
 } from "firebase/firestore";
 import db from "./firestore";
 import W3asError from "./lib/w3asError";
-import { CredentialDeviceType } from "@simplewebauthn/typescript-types";
+import {
+  AuthenticatorDevice,
+  CredentialDeviceType,
+} from "@simplewebauthn/typescript-types";
 import crypto from "crypto";
 
 export interface Authenticator {
-  credentialIdBase64: string;
-  credentialPublicKeyBase64: string;
+  credentialIdBase64Url: string;
+  credentialPublicKeyBase64Url: string;
   counter: number;
   credentialDeviceType: CredentialDeviceType;
   credentialBackedUp: boolean;
 }
 
-const accountIdsRef = collection(db, "accountIds");
+interface AccountAuthenticator {
+  accountId: string;
+  authenticator: Authenticator;
+}
+
+const usernamesRef = collection(db, "usernames");
 
 export async function setAccountId(username: string) {
-  let accountId = await getAccountId(username);
+  let accountId = await getAccountIdFromUsername(username);
 
   if (accountId != null) {
     throw new W3asError({
@@ -35,45 +44,90 @@ export async function setAccountId(username: string) {
   }
 
   accountId = crypto.randomUUID();
-  const accountIdRef = doc(accountIdsRef, username);
-  await setDoc(accountIdRef, { id: accountId });
+  const accountIdRef = doc(usernamesRef, username);
+  await setDoc(accountIdRef, { accountId: accountId });
 
   return accountId;
 }
 
-export async function getAccountId(username: string) {
-  const accountIdRef = doc(accountIdsRef, username);
+export async function getAccountIdFromUsername(username: string) {
+  const accountIdRef = doc(usernamesRef, username);
   const accountIdSnap = await getDoc(accountIdRef);
 
-  return accountIdSnap.exists() ? (accountIdSnap.data().id as string) : null;
+  return accountIdSnap.data()?.accountId as string | undefined;
+}
+
+export async function getAccountIdFromCredentialId(credentialId: string) {
+  const authenticatorRef = doc(authenticatorsRef, credentialId);
+  const authenticatorSnap = await getDoc(authenticatorRef);
+
+  return authenticatorSnap.data()?.accountId as string | undefined;
+}
+
+export function toAuthenticatorDevice(authenticator: Authenticator) {
+  const authenticatorDevice: AuthenticatorDevice = {
+    credentialID: Buffer.from(authenticator.credentialIdBase64Url, "base64url"),
+    credentialPublicKey: Buffer.from(
+      authenticator.credentialPublicKeyBase64Url,
+      "base64url"
+    ),
+    counter: authenticator.counter,
+  };
+
+  return authenticatorDevice;
 }
 
 const accountsRef = collection(db, "accounts");
+const authenticatorsRef = collection(db, "authenticators");
 
 export async function setAccountAuthenticator(
   accountId: string,
   authenticator: Authenticator
 ) {
-  const authenticatorRef = doc(
-    accountsRef,
-    accountId,
-    "authenticators",
-    authenticator.credentialIdBase64
-  );
-  await setDoc(authenticatorRef, authenticator);
+  const accountRef = doc(accountsRef, accountId);
+  const credentialId = authenticator.credentialIdBase64Url;
+  await updateDoc(accountRef, { authenticators: arrayUnion(credentialId) });
+
+  const authenticatorRef = doc(authenticatorsRef, credentialId);
+  await setDoc(authenticatorRef, { accountId, authenticator });
+}
+
+export async function getAccountAuthenticator(credentialId: string) {
+  const authenticatorRef = doc(authenticatorsRef, credentialId);
+  const authenticatorSnap = await getDoc(authenticatorRef);
+
+  return authenticatorSnap.data() as AccountAuthenticator | undefined;
+}
+
+export async function updateAuthenticatorCounter(
+  credentialId: string,
+  newCounter: number
+) {
+  const authenticatorRef = doc(authenticatorsRef, credentialId);
+  await updateDoc(authenticatorRef, { "authenticator.counter": newCounter });
 }
 
 export async function getAccountAuthenticators(
   accountId: string
 ): Promise<Authenticator[]> {
-  const authenticatorsRef = collection(
-    accountsRef,
-    accountId,
-    "authenticators"
+  const accountRef = doc(accountsRef, accountId);
+  const accountSnap = await getDoc(accountRef);
+  const credentialIds = (accountSnap.data()?.credentialIds as string[]) ?? [];
+  const authenticators = await Promise.all(
+    credentialIds.map(async (credentialId) => {
+      try {
+        const authenticatorRef = await doc(authenticatorsRef, credentialId);
+        const authenticatorSnap = await getDoc(authenticatorRef);
+        return authenticatorSnap.data()?.authenticator as Authenticator;
+      } catch (error) {
+        console.log(error);
+      }
+    })
   );
-  const authenticatorsSnap = await getDocs(authenticatorsRef);
 
-  return authenticatorsSnap.docs.map((doc) => doc.data() as Authenticator);
+  return authenticators.filter(
+    (authenticator): authenticator is Authenticator => authenticator != null
+  );
 }
 
 export async function setCurrentChallenge(
@@ -88,12 +142,7 @@ export async function getCurrentChallenge(accountId: string) {
   const accountRef = doc(accountsRef, accountId);
   const accountSnap = await getDoc(accountRef);
 
-  if (!accountSnap.exists()) {
-    return null;
-  }
-
-  const challenge = accountSnap.data().challenge;
-  return challenge ? (challenge as string) : null;
+  return accountSnap.data()?.challenge as string | undefined;
 }
 
 export async function removeCurrentChallenge(accountId: string) {

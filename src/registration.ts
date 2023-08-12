@@ -4,12 +4,11 @@ import {
 } from "@simplewebauthn/server";
 import { RegistrationResponseJSON } from "@simplewebauthn/typescript-types";
 import { getEnv } from "./lib/envVar";
-import { base64ToBytes, bytesToBase64 } from "./lib/base64";
 import W3asError from "./lib/w3asError";
 import {
   Authenticator,
   getAccountAuthenticators,
-  getAccountId,
+  getAccountIdFromUsername,
   getCurrentChallenge,
   removeCurrentChallenge,
   setAccountAuthenticator,
@@ -18,13 +17,21 @@ import {
 } from "./account";
 
 export async function generateRegistrationOptions(username: string) {
-  const userId =
-    (await getAccountId(username)) || (await setAccountId(username));
-  const userAuthenticators = await getAccountAuthenticators(userId);
+  if ((await getAccountIdFromUsername(username)) != null) {
+    throw new W3asError({
+      type: "registeration/options/account-already-exists",
+      title: "Account already exists",
+      status: 400,
+      detail: `Account already exists for ${username}`,
+    });
+  }
+
+  const accountId = await setAccountId(username);
+  const userAuthenticators = await getAccountAuthenticators(accountId);
   const options = genRegistrationOptions({
     rpName: getEnv("RP_NAME"),
     rpID: getEnv("RP_ID"),
-    userID: userId,
+    userID: accountId,
     userName: username,
     timeout: 60000,
     attestationType: "none",
@@ -33,37 +40,37 @@ export async function generateRegistrationOptions(username: string) {
       userVerification: "preferred",
     },
     excludeCredentials: userAuthenticators.map((authenticator) => ({
-      id: base64ToBytes(authenticator.credentialIdBase64),
+      id: Buffer.from(authenticator.credentialIdBase64Url, "base64url"),
       type: "public-key",
     })),
   });
 
-  await setCurrentChallenge(userId, options.challenge);
+  await setCurrentChallenge(accountId, options.challenge);
 
   return options;
 }
 
-export async function verifyRegistration(
+export async function verifyAttestationReponse(
   username: string,
-  response: RegistrationResponseJSON
+  attestationReponse: RegistrationResponseJSON
 ) {
-  const userId = await getAccountId(username);
+  const accountId = await getAccountIdFromUsername(username);
 
-  if (userId == null) {
+  if (accountId == null) {
     throw new W3asError({
-      type: "register/verification/user-not-found",
-      title: "User not found for verification",
+      type: "registeration/attestation/user-not-found",
+      title: "User not found for attestation",
       status: 404,
       detail: `User (${username}) not found`,
     });
   }
 
-  const expectedChallenge = await getCurrentChallenge(userId);
+  const expectedChallenge = await getCurrentChallenge(accountId);
 
   if (expectedChallenge == null) {
     throw new W3asError({
-      type: "register/verification/challenge-not-found",
-      title: "Challenge not found during verification",
+      type: "registeration/attestation/challenge-not-found",
+      title: "Challenge not found during attestation",
       status: 500,
       detail: `Challenge not found for user (${username})`,
     });
@@ -72,16 +79,19 @@ export async function verifyRegistration(
   let verification;
   try {
     verification = await verifyRegistrationResponse({
-      response,
+      response: attestationReponse,
       expectedChallenge,
       expectedOrigin: getEnv("ORIGIN"),
       expectedRPID: getEnv("RP_ID"),
     });
+    if (!verification.verified) {
+      return { verified: false };
+    }
   } catch (error) {
-    await removeCurrentChallenge(userId);
+    await removeCurrentChallenge(accountId);
     throw new W3asError(
       {
-        type: "register/verification/verify-registration-response-failed",
+        type: "registeration/attestation/verify-registration-response-failed",
         title: "Failed to verify registration response",
         status: 500,
         detail: `Reason: ${error}`,
@@ -90,17 +100,17 @@ export async function verifyRegistration(
     );
   }
 
-  const { verified, registrationInfo } = verification;
+  const { registrationInfo } = verification;
 
   console.warn(JSON.stringify(registrationInfo, null, 2));
 
   if (registrationInfo == null) {
-    await removeCurrentChallenge(userId);
+    await removeCurrentChallenge(accountId);
     throw new W3asError({
-      type: "register/verification/registration-info-not-found",
-      title: "Challenge not found during verification",
+      type: "registeration/attestation/registration-info-missing",
+      title: "Registration info missing",
       status: 500,
-      detail: `Challenge not found for user (${username})`,
+      detail: `Registration info missing from attestation verification response`,
     });
   }
 
@@ -117,16 +127,21 @@ export async function verifyRegistration(
     return { verified: false, message: "Not a passkey" };
   }*/
 
+  const credentialIdBase64Url = Buffer.from(credentialID).toString("base64url");
+  console.log("credentialIdBase64: " + credentialIdBase64Url);
+  const credentialPublicKeyBase64Url =
+    Buffer.from(credentialPublicKey).toString("base64url");
+  console.log("credentialPublicKey: " + credentialPublicKeyBase64Url);
   const authenticator: Authenticator = {
-    credentialIdBase64: bytesToBase64(credentialID),
-    credentialPublicKeyBase64: bytesToBase64(credentialPublicKey),
+    credentialIdBase64Url: credentialIdBase64Url,
+    credentialPublicKeyBase64Url: credentialPublicKeyBase64Url,
     counter: counter,
     credentialDeviceType: credentialDeviceType,
     credentialBackedUp: credentialBackedUp,
   };
 
-  await setAccountAuthenticator(userId, authenticator);
-  await removeCurrentChallenge(userId);
+  await setAccountAuthenticator(accountId, authenticator);
+  await removeCurrentChallenge(accountId);
 
-  return { verified };
+  return { verified: true };
 }
